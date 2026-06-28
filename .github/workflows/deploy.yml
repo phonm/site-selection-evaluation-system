@@ -32,6 +32,13 @@ jobs:
         run: npm ci
 
       - name: Build
+        env:
+          VITE_FIREBASE_API_KEY: ${{ vars.VITE_FIREBASE_API_KEY || 'AIzaSyBfgxnhg6Jf_rB4cqvdpnQsJwtZKXVYmaE' }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ vars.VITE_FIREBASE_AUTH_DOMAIN || 'site-selection-evaluation.firebaseapp.com' }}
+          VITE_FIREBASE_PROJECT_ID: ${{ vars.VITE_FIREBASE_PROJECT_ID || 'site-selection-evaluation' }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ vars.VITE_FIREBASE_STORAGE_BUCKET || 'site-selection-evaluation.firebasestorage.app' }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.VITE_FIREBASE_MESSAGING_SENDER_ID || '1035055535584' }}
+          VITE_FIREBASE_APP_ID: ${{ vars.VITE_FIREBASE_APP_ID || '1:1035055535584:web:06a245ea226b0fc994c785' }}
         run: npm run build
 
       - name: Setup Pages

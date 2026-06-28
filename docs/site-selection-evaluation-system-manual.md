@@ -1226,6 +1226,6 @@ manualLoanBasePrice,0,萬
 1. GitHub Actions 的 build 階段必須提供 `VITE_FIREBASE_API_KEY`、`VITE_FIREBASE_AUTH_DOMAIN`、`VITE_FIREBASE_PROJECT_ID`、`VITE_FIREBASE_STORAGE_BUCKET`、`VITE_FIREBASE_MESSAGING_SENDER_ID`、`VITE_FIREBASE_APP_ID`。
 2. 這些 Firebase Web config 會被打包進前端程式，屬於瀏覽器端公開設定，不應依賴它作為資料安全邊界。
 3. 資料隔離必須依靠 Firebase Authentication 與 Firestore Security Rules，建議規則限制使用者只能讀寫 `users/{uid}/datasets/{datasetId}` 中自己的 `uid`。
-4. 若使用 Google 登入，Firebase Console > Authentication > Settings > Authorized domains 必須加入 GitHub Pages 網域，例如 `phonm.github.io`。若沒有加入，GitHub Pages 上會出現授權網域錯誤。
+4. 若使用 Google 登入，Firebase Console > Authentication > Settings > Authorized domains 必須加入實際使用網域。GitHub Pages 版本需加入 `phonm.github.io`；本機開發需加入 `localhost` 與 `127.0.0.1`。若沒有加入，登入或註冊流程會出現授權網域錯誤。
 5. 若想避免把專案預設 Firebase config 寫在 workflow，可改用 GitHub Repository Variables 設定同名 `VITE_FIREBASE_*` 變數；workflow 會優先使用 GitHub Variables。
 6. 本機 `.env` 不會提交到 GitHub，僅供本機開發使用。

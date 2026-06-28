@@ -1009,7 +1009,9 @@ function firebaseErrorMessage(error) {
     return 'Firebase Authentication 尚未啟用。請到 Firebase Console > Authentication > Sign-in method 啟用 Google 或 Email/Password。';
   }
   if (code === 'auth/unauthorized-domain') {
-    return '目前網域未授權。請到 Firebase Authentication > Settings > Authorized domains 加入 127.0.0.1 與 localhost。';
+    const host = window.location.hostname || '目前網域';
+    const localNote = host === '127.0.0.1' || host === 'localhost' ? '本機測試也可同時加入 127.0.0.1 與 localhost。' : '本機測試另可加入 127.0.0.1 與 localhost。';
+    return `目前網域未授權。請到 Firebase Authentication > Settings > Authorized domains 加入 ${host}。${localNote}`;
   }
   if (code === 'auth/popup-closed-by-user') return '登入視窗已關閉，尚未完成登入。';
   if (code === 'auth/invalid-email') return 'Email 格式不正確。';

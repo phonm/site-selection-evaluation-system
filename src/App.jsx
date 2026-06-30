@@ -156,34 +156,23 @@ const DEFAULT_MORTGAGE_PARAMS = {
   loanTerms: [20, 30, 40],
   primaryTermYears: 30,
   gracePeriodYears: 0,
-  loanBaseMode: 'lowerOfAskingAndMarket',
   maxLoanAmount: 0,
   transactionCostPercent: 3,
   monthlyPaymentLimit: 0,
-  manualLoanBasePrice: 0,
 };
 
-const LOAN_BASE_MODES = [
-  { value: 'lowerOfAskingAndMarket', label: '開價與市場估值取低' },
-  { value: 'askingPrice', label: '賣家開價' },
-  { value: 'actualTransaction', label: '實登總價' },
-  { value: 'marketValuation', label: '市場估值價' },
-  { value: 'manual', label: '手動核貸價' },
-];
-
 function normalizeMortgageParams(params = {}, fallback = DEFAULT_MORTGAGE_PARAMS) {
-  const allowedModes = new Set(LOAN_BASE_MODES.map((mode) => mode.value));
   const next = { ...fallback, ...params };
   next.loanTerms = parseLoanTerms(next.loanTerms, fallback.loanTerms);
   next.primaryTermYears = parseLoanTerms([next.primaryTermYears], [fallback.primaryTermYears])[0] || fallback.primaryTermYears;
-  next.loanBaseMode = allowedModes.has(next.loanBaseMode) ? next.loanBaseMode : DEFAULT_MORTGAGE_PARAMS.loanBaseMode;
   next.loanToValuePercent = clampNumber(next.loanToValuePercent, 0, 100, fallback.loanToValuePercent);
   next.annualInterestRatePercent = clampNumber(next.annualInterestRatePercent, 0, 100, fallback.annualInterestRatePercent);
   next.gracePeriodYears = clampNumber(next.gracePeriodYears, 0, 50, fallback.gracePeriodYears);
   next.maxLoanAmount = clampNumber(next.maxLoanAmount, 0, Number.MAX_SAFE_INTEGER, fallback.maxLoanAmount);
   next.transactionCostPercent = clampNumber(next.transactionCostPercent, 0, 100, fallback.transactionCostPercent);
   next.monthlyPaymentLimit = clampNumber(next.monthlyPaymentLimit, 0, Number.MAX_SAFE_INTEGER, fallback.monthlyPaymentLimit);
-  next.manualLoanBasePrice = clampNumber(next.manualLoanBasePrice, 0, Number.MAX_SAFE_INTEGER, fallback.manualLoanBasePrice);
+  delete next.loanBaseMode;
+  delete next.manualLoanBasePrice;
   return next;
 }
 
@@ -204,6 +193,61 @@ const DEFAULT_DISTANCES = DEFAULT_DISTANCE_TARGETS.reduce((acc, target) => {
   acc[target.id] = 0;
   return acc;
 }, {});
+
+const DERIVED_IMPORT_KEYS = new Set([
+  'weightedScore',
+  'actualTransactionBuildingPrice',
+  'actualTransactionGrossUnitPrice',
+  'actualTransactionBuildingUnitPrice',
+  'actualTransactionExpandableEfficiencyUnitPrice',
+  'actualTransactionCoreEfficiencyUnitPrice',
+  'grossUnitPrice',
+  'buildingUnitPrice',
+  'expandableEfficiencyUnitPrice',
+  'coreEfficiencyUnitPrice',
+  'marketValuationPrice',
+  'suggestedBuyingPrice',
+  'maxChasePrice',
+  'mortgage.loanBasePrice',
+  'mortgage.loanAmount',
+  'mortgage.downPayment',
+  'mortgage.transactionCost',
+  'mortgage.initialCashNeeded',
+  'mortgage.primaryMonthlyPayment',
+  'mortgage.affordabilityStatus',
+  'mortgage.loanGap',
+]);
+
+const DERIVED_IMPORT_LABELS = new Set([
+  '加權總分',
+  '實登建物價格',
+  '實登總價全坪單價',
+  '實登建物扣車位單價',
+  '實登展開坪效單價',
+  '實登核心坪效單價',
+  '總價全坪單價',
+  '建物扣車位單價',
+  '展開坪效單價',
+  '核心坪效單價',
+  '市場估值價',
+  '建議下錨價',
+  '最高追價',
+  '貸款基準價',
+  '可貸金額',
+  '自備款',
+  '交易成本',
+  '初期現金需求',
+  '主要年期月付',
+  '月付壓力',
+  '貸款缺口',
+]);
+
+const RUNTIME_PROPERTY_KEYS = new Set([
+  'derived',
+  'weightedScore',
+  'groups',
+  'constraintIssues',
+]);
 
 function clampNumber(value, min, max, fallback = 0) {
   const parsed = Number(String(value ?? '').replace(/,/g, '').trim());
@@ -227,7 +271,8 @@ function parseLoanTerms(value, fallback = DEFAULT_MORTGAGE_PARAMS.loanTerms) {
 }
 
 function amortizedMonthlyPayment(loanAmount, annualRatePercent, years) {
-  const amount = clampNumber(loanAmount, 0, Number.MAX_SAFE_INTEGER);
+  // loanAmount is stored in 10k TWD units; monthly payment is displayed in TWD.
+  const amount = clampNumber(loanAmount, 0, Number.MAX_SAFE_INTEGER) * 10000;
   const termMonths = Math.max(1, Math.round(clampNumber(years, 1, 50) * 12));
   const monthlyRate = clampNumber(annualRatePercent, 0, 100) / 100 / 12;
   if (amount <= 0) return 0;
@@ -491,29 +536,15 @@ function calculateDerived(rawData, scores = DEFAULT_SCORES, constraints = DEFAUL
   const maxLoanAmount = clampNumber(mortgageParams.maxLoanAmount, 0, Number.MAX_SAFE_INTEGER);
   const transactionCostPercent = clampNumber(mortgageParams.transactionCostPercent, 0, 100);
   const monthlyPaymentLimit = clampNumber(mortgageParams.monthlyPaymentLimit, 0, Number.MAX_SAFE_INTEGER);
-  const manualLoanBasePrice = clampNumber(mortgageParams.manualLoanBasePrice, 0, Number.MAX_SAFE_INTEGER);
   const gracePeriodYears = clampNumber(mortgageParams.gracePeriodYears, 0, 50);
-  let loanBasePrice = Math.min(totalPrice || marketValuationPrice, marketValuationPrice || totalPrice);
-  let loanBaseSource = '開價與市場估值取低';
-  if (mortgageParams.loanBaseMode === 'askingPrice') {
-    loanBasePrice = totalPrice;
-    loanBaseSource = '賣家開價';
-  } else if (mortgageParams.loanBaseMode === 'actualTransaction') {
-    loanBasePrice = actualTransactionTotalPrice > 0 ? actualTransactionTotalPrice : loanBasePrice;
-    loanBaseSource = actualTransactionTotalPrice > 0 ? '實登總價' : '開價與市場估值取低';
-  } else if (mortgageParams.loanBaseMode === 'marketValuation') {
-    loanBasePrice = marketValuationPrice;
-    loanBaseSource = '市場估值價';
-  } else if (mortgageParams.loanBaseMode === 'manual' && manualLoanBasePrice > 0) {
-    loanBasePrice = manualLoanBasePrice;
-    loanBaseSource = '手動核貸價';
-  }
+  const loanBasePrice = totalPrice;
+  const loanBaseSource = '賣家開價 / 總價';
   const loanAmountByRatio = loanBasePrice * (loanToValuePercent / 100);
   const loanAmount = maxLoanAmount > 0 ? Math.min(loanAmountByRatio, maxLoanAmount) : loanAmountByRatio;
   const downPayment = Math.max(0, totalPrice - loanAmount);
   const transactionCost = totalPrice * (transactionCostPercent / 100);
   const initialCashNeeded = downPayment + transactionCost;
-  const graceMonthlyPayment = loanAmount * (annualInterestRatePercent / 100 / 12);
+  const graceMonthlyPayment = loanAmount * 10000 * (annualInterestRatePercent / 100 / 12);
   const monthlyPayments = Object.fromEntries(
     loanTerms.map((term) => [term, amortizedMonthlyPayment(loanAmount, annualInterestRatePercent, term)]),
   );
@@ -678,6 +709,37 @@ function recordsFromSection(sectionRows) {
   });
 }
 
+function stripDerivedImportColumns(record) {
+  return Object.fromEntries(
+    Object.entries(record).filter(([key]) => (
+      !DERIVED_IMPORT_KEYS.has(key)
+      && !DERIVED_IMPORT_LABELS.has(key)
+      && !key.startsWith('mortgage.')
+    )),
+  );
+}
+
+function normalizePropertyForState(property, index = 0) {
+  const rawData = { ...DEFAULT_RAW_DATA, ...(property?.rawData ?? {}) };
+  DERIVED_IMPORT_KEYS.forEach((key) => {
+    delete rawData[key];
+    delete rawData[key.replace(/^mortgage\./, '')];
+  });
+  DERIVED_IMPORT_LABELS.forEach((label) => delete rawData[label]);
+
+  const scores = { ...DEFAULT_SCORES, ...(property?.scores ?? {}) };
+  const distances = { ...DEFAULT_DISTANCES, ...(property?.distances ?? {}) };
+  const cleanProperty = {
+    id: Number.isFinite(Number(property?.id)) ? Number(property.id) : Date.now() + index,
+    name: String(property?.name ?? '').trim() || `匯入物件 ${index + 1}`,
+    rawData,
+    distances,
+    scores,
+  };
+  RUNTIME_PROPERTY_KEYS.forEach((key) => delete cleanProperty[key]);
+  return cleanProperty;
+}
+
 function targetsFromGlobalSection(sectionRows, fallbackTargets) {
   const records = recordsFromSection(sectionRows);
   if (records.length === 0) return fallbackTargets;
@@ -713,8 +775,7 @@ function mortgageParamsFromSection(sectionRows, fallbackParams) {
     const key = String(findCell(record, ['參數', 'key']) ?? '').trim();
     const value = findCell(record, ['值', 'value']);
     if (!key || !Object.prototype.hasOwnProperty.call(next, key)) return;
-    if (key === 'loanBaseMode') next[key] = String(value || next[key]);
-    else if (key === 'loanTerms') next[key] = parseLoanTerms(value, next[key]);
+    if (key === 'loanTerms') next[key] = parseLoanTerms(value, next[key]);
     else next[key] = clampNumber(value, 0, Number.MAX_SAFE_INTEGER, next[key]);
   });
   return normalizeMortgageParams(next, fallbackParams);
@@ -737,9 +798,10 @@ function targetsFromRecords(records, fallbackTargets) {
 }
 
 function propertyFromRecord(record, index) {
+  const importRecord = stripDerivedImportColumns(record);
   const rawData = { ...DEFAULT_RAW_DATA };
   for (const field of RAW_FIELDS) {
-    const value = findCell(record, [field.label, field.key, `rawData.${field.key}`, ...(field.aliases ?? [])]);
+    const value = findCell(importRecord, [field.label, field.key, `rawData.${field.key}`, ...(field.aliases ?? [])]);
     if (field.type === 'number') rawData[field.key] = clampNumber(value, 0, Number.MAX_SAFE_INTEGER, 0);
     else if (field.type === 'booleanText') rawData[field.key] = normalizeBooleanText(value);
     else if (field.type === 'select') rawData[field.key] = field.options.includes(value) ? value : field.options[0];
@@ -748,14 +810,14 @@ function propertyFromRecord(record, index) {
 
   const scores = { ...DEFAULT_SCORES };
   for (const field of SCORE_FIELDS) {
-    const value = findCell(record, [`評分-${field.label}`, field.label, field.key, `scores.${field.key}`]);
+    const value = findCell(importRecord, [`評分-${field.label}`, field.label, field.key, `scores.${field.key}`]);
     scores[field.key] = Math.round(clampNumber(value, 0, 10, DEFAULT_SCORES[field.key]));
   }
 
   const distances = {};
-  const exportedDistanceLabels = Object.keys(record).filter((key) => key.startsWith('距離-') && key.endsWith('(公尺)'));
+  const exportedDistanceLabels = Object.keys(importRecord).filter((key) => key.startsWith('距離-') && key.endsWith('(公尺)'));
   for (let order = 1; order <= MAX_DISTANCE_TARGETS; order += 1) {
-    const value = findCell(record, [
+    const value = findCell(importRecord, [
       `距離-目標${order}(公尺)`,
       exportedDistanceLabels[order - 1],
       `distances.target${order}`,
@@ -764,9 +826,9 @@ function propertyFromRecord(record, index) {
     distances[`target${order}`] = clampNumber(value, 0, Number.MAX_SAFE_INTEGER, 0);
   }
 
-  const idValue = findCell(record, ['id', 'ID']);
+  const idValue = findCell(importRecord, ['id', 'ID']);
   const id = Number.isFinite(Number(idValue)) ? Number(idValue) : Date.now() + index;
-  const name = String(findCell(record, ['物件名稱', 'name']) ?? '').trim() || `匯入物件 ${index + 1}`;
+  const name = String(findCell(importRecord, ['物件名稱', 'name']) ?? '').trim() || `匯入物件 ${index + 1}`;
   return { id, name, rawData, distances, scores };
 }
 
@@ -808,6 +870,72 @@ const PRIORITY_RAW_ROW_KEYS = new Set([
   'averageUnitPriceHistorical',
   'latestTransactionDate',
 ]);
+
+const COMPARISON_ROW_GROUPS = [
+  { id: 'overview', label: '決策總覽', description: '總分、門檻與建議出價，適合先快速篩選候選物件。', color: '#176b87' },
+  { id: 'priceMarket', label: '價格行情', description: '總價、實價登錄、區域行情與單價差異，適合議價與行情判斷。', color: '#8e4a63' },
+  { id: 'mortgage', label: '貸款現金流', description: '貸款基準、可貸金額、自備款、月付與貸款缺口。', color: '#53616f' },
+  { id: 'space', label: '坪數空間', description: '建坪、1F 面積、附屬面積、夾層、公設、土地與車位等空間資料。', color: '#b07823' },
+  { id: 'location', label: '位置交通', description: '地址、行政區、商圈、臨路與全域距離目標。', color: '#2d7d70' },
+  { id: 'condition', label: '格局硬體', description: '面寬、深度、路寬、方正、挑高、採光、角間與硬體備註。', color: '#5f7c3a' },
+  { id: 'scoring', label: '策略評分', description: '可直接輸入 0-10 分的主觀策略評分。', color: '#6b5aa8' },
+];
+
+const COMPARISON_SPACE_RAW_KEYS = new Set([
+  'buildArea',
+  'firstFloorArea',
+  'attachedArea',
+  'hasMezzanine',
+  'mezzanineArea',
+  'sharedArea',
+  'landArea',
+  'parkingCount',
+  'parkingArea',
+  'parkingPrice',
+]);
+
+const COMPARISON_LOCATION_RAW_KEYS = new Set([
+  'address',
+  'district',
+  'businessZone',
+  'isMainRoad',
+  'nearbyParkingNote',
+  'environmentNote',
+]);
+
+const COMPARISON_CONDITION_RAW_KEYS = new Set([
+  'buildingName',
+  'coverPhotoUrl',
+  'photoUrls',
+  'direction',
+  'age',
+  'isCornerLot',
+  'frontageWidth',
+  'depth',
+  'roadWidth',
+  'isSquare',
+  'ceilingHeight',
+  'firstFloorLight',
+  'secondFloorLight',
+  'hardwareNote',
+  'memo',
+]);
+
+function comparisonRowGroupId(row) {
+  if (row.id === 'score.total' || row.id === 'constraint.issues' || row.id.startsWith('offer.')) return 'overview';
+  if (row.id.startsWith('price.') || row.id.startsWith('market.')) return 'priceMarket';
+  if (row.id.startsWith('mortgage.')) return 'mortgage';
+  if (row.id.startsWith('score.')) return 'scoring';
+  if (row.id.startsWith('distance.')) return 'location';
+  if (row.id.startsWith('raw.')) {
+    const rawKey = row.id.slice(4);
+    if (PRIORITY_RAW_ROW_KEYS.has(rawKey)) return 'priceMarket';
+    if (COMPARISON_SPACE_RAW_KEYS.has(rawKey)) return 'space';
+    if (COMPARISON_LOCATION_RAW_KEYS.has(rawKey)) return 'location';
+    if (COMPARISON_CONDITION_RAW_KEYS.has(rawKey)) return 'condition';
+  }
+  return 'condition';
+}
 
 function buildComparisonRows(distanceTargets, weights) {
   return [
@@ -914,7 +1042,8 @@ function buildComparisonRows(distanceTargets, weights) {
       label: field.label,
       meta: `權重 ${weights[field.key]}%`,
       description: `${field.label} 的主觀評分，0 到 10 分。總分會按目前權重正規化後計入。`,
-      kind: 'numeric',
+      kind: 'score',
+      scoreKey: field.key,
       getNumeric: (property) => property.scores[field.key] ?? 0,
       getValue: (property) => property.scores[field.key] ?? 0,
     })),
@@ -971,6 +1100,14 @@ function sortComparisonProperties(properties, rows, sortConfig) {
   });
 }
 
+function orderComparisonProperties(properties, propertyOrder) {
+  if (!propertyOrder?.length) return properties;
+  const propertyMap = new Map(properties.map((property) => [String(property.id), property]));
+  const ordered = propertyOrder.map((id) => propertyMap.get(String(id))).filter(Boolean);
+  const orderedIds = new Set(ordered.map((property) => String(property.id)));
+  return [...ordered, ...properties.filter((property) => !orderedIds.has(String(property.id)))];
+}
+
 function serializeWorkspace(state) {
   return {
     properties: state.properties,
@@ -983,6 +1120,7 @@ function serializeWorkspace(state) {
     hiddenComparisonRows: state.hiddenComparisonRows,
     pinnedComparisonRows: state.pinnedComparisonRows,
     comparisonSort: state.comparisonSort,
+    comparisonPropertyOrder: state.comparisonPropertyOrder,
     savedAt: new Date().toISOString(),
   };
 }
@@ -990,7 +1128,9 @@ function serializeWorkspace(state) {
 function normalizeWorkspacePayload(payload = {}) {
   const mortgageParams = normalizeMortgageParams(payload.mortgageParams);
   return {
-    properties: Array.isArray(payload.properties) ? payload.properties : initialProperties,
+    properties: Array.isArray(payload.properties)
+      ? payload.properties.map((property, index) => normalizePropertyForState(property, index))
+      : initialProperties.map((property, index) => normalizePropertyForState(property, index)),
     distanceTargets: Array.isArray(payload.distanceTargets) ? payload.distanceTargets : DEFAULT_DISTANCE_TARGETS,
     constraints: { ...DEFAULT_CONSTRAINTS, ...(payload.constraints ?? {}) },
     mortgageParams,
@@ -1000,6 +1140,7 @@ function normalizeWorkspacePayload(payload = {}) {
     hiddenComparisonRows: Array.isArray(payload.hiddenComparisonRows) ? payload.hiddenComparisonRows : [],
     pinnedComparisonRows: Array.isArray(payload.pinnedComparisonRows) ? payload.pinnedComparisonRows : [],
     comparisonSort: payload.comparisonSort?.rowId ? payload.comparisonSort : { rowId: '', direction: 'desc' },
+    comparisonPropertyOrder: Array.isArray(payload.comparisonPropertyOrder) ? payload.comparisonPropertyOrder : [],
   };
 }
 
@@ -1037,6 +1178,7 @@ export default function App() {
   const [hiddenComparisonRows, setHiddenComparisonRows] = useState([]);
   const [pinnedComparisonRows, setPinnedComparisonRows] = useState([]);
   const [comparisonSort, setComparisonSort] = useState({ rowId: '', direction: 'desc' });
+  const [comparisonPropertyOrder, setComparisonPropertyOrder] = useState([]);
   const [photoViewer, setPhotoViewer] = useState(null);
   const [user, setUser] = useState(null);
   const [authMessage, setAuthMessage] = useState('');
@@ -1104,6 +1246,7 @@ export default function App() {
     setHiddenComparisonRows(normalized.hiddenComparisonRows);
     setPinnedComparisonRows(normalized.pinnedComparisonRows);
     setComparisonSort(normalized.comparisonSort);
+    setComparisonPropertyOrder(normalized.comparisonPropertyOrder);
   }
 
   function currentWorkspacePayload() {
@@ -1118,6 +1261,7 @@ export default function App() {
       hiddenComparisonRows,
       pinnedComparisonRows,
       comparisonSort,
+      comparisonPropertyOrder,
     });
   }
 
@@ -1270,11 +1414,9 @@ export default function App() {
       ['loanTerms', mortgageParams.loanTerms.join(','), '年'],
       ['primaryTermYears', mortgageParams.primaryTermYears, '年'],
       ['gracePeriodYears', mortgageParams.gracePeriodYears, '年'],
-      ['loanBaseMode', mortgageParams.loanBaseMode, '模式'],
       ['maxLoanAmount', mortgageParams.maxLoanAmount, '萬'],
       ['transactionCostPercent', mortgageParams.transactionCostPercent, '%'],
       ['monthlyPaymentLimit', mortgageParams.monthlyPaymentLimit, '元/月'],
-      ['manualLoanBasePrice', mortgageParams.manualLoanBasePrice, '萬'],
       [],
       [CSV_SECTION_MARKER, CSV_SECTION_PROPERTIES],
       csvColumns.map((col) => col.label),
@@ -1288,9 +1430,12 @@ export default function App() {
       orderComparisonRows(buildComparisonRows(distanceTargets, weights), comparisonRowOrder),
       hiddenComparisonRows,
     );
-    const sortedProperties = sortComparisonProperties(calculatedProperties, rowsForExport, comparisonSort);
+    const sortedProperties = orderComparisonProperties(
+      sortComparisonProperties(calculatedProperties, rowsForExport, comparisonSort),
+      comparisonPropertyOrder,
+    );
     const rows = [
-      ['項目', ...sortedProperties.map((property, index) => `第 ${index + 1} 名 ${property.name || '未命名物件'}`)],
+      ['項目', ...sortedProperties.map((property, index) => `第 ${index + 1} 欄 ${property.name || '未命名物件'}`)],
       ...rowsForExport.map((row) => [
         row.meta ? `${row.label}｜${row.meta}` : `${row.label}｜${row.section}`,
         ...sortedProperties.map((property) => row.getValue(property)),
@@ -1333,6 +1478,7 @@ export default function App() {
     setConstraints(importedConstraints);
     setMortgageParams(importedMortgageParams);
     setProperties(imported);
+    setComparisonPropertyOrder([]);
     setImportMessage(`已匯入 ${imported.length} 筆物件，並套用 ${importedTargets.length} 個距離目標與全域門檻。`);
     if (user && firebaseReady) {
       try {
@@ -1351,6 +1497,7 @@ export default function App() {
             hiddenComparisonRows: [],
             pinnedComparisonRows: [],
             comparisonSort,
+            comparisonPropertyOrder: [],
           }),
         );
         setActiveDatasetId(id);
@@ -1444,11 +1591,9 @@ export default function App() {
               onUpdate={(key, value) =>
                 setMortgageParams((state) => ({
                   ...state,
-                  [key]: key === 'loanBaseMode'
-                    ? value
-                    : key === 'loanTerms'
-                      ? parseLoanTerms(value, state.loanTerms)
-                      : clampNumber(value, 0, Number.MAX_SAFE_INTEGER),
+                  [key]: key === 'loanTerms'
+                    ? parseLoanTerms(value, state.loanTerms)
+                    : clampNumber(value, 0, Number.MAX_SAFE_INTEGER),
                 }))
               }
             />
@@ -1490,6 +1635,7 @@ export default function App() {
         </main>
       ) : (
         <ComparisonPage
+          comparisonPropertyOrder={comparisonPropertyOrder}
           comparisonRowOrder={comparisonRowOrder}
           comparisonSort={comparisonSort}
           distanceTargets={distanceTargets}
@@ -1497,9 +1643,14 @@ export default function App() {
           onExport={exportComparisonCsv}
           onHiddenRowsChange={setHiddenComparisonRows}
           onPinnedRowsChange={setPinnedComparisonRows}
+          onPropertyOrderChange={setComparisonPropertyOrder}
           onRowOrderChange={setComparisonRowOrder}
           onOpenPhoto={(property, index = 0) => setPhotoViewer({ property, index })}
-          onSortChange={setComparisonSort}
+          onScore={updateScore}
+          onSortChange={(nextSort) => {
+            setComparisonPropertyOrder([]);
+            setComparisonSort(nextSort);
+          }}
           pinnedRowIds={pinnedComparisonRows}
           properties={calculatedProperties}
           totalWeight={totalWeight}
@@ -1615,18 +1766,6 @@ function MortgagePanel({ onUpdate, params }) {
         <label className="field compact">
           <span>每月可負擔上限(元)</span>
           <input min="0" type="number" value={params.monthlyPaymentLimit} onChange={(event) => onUpdate('monthlyPaymentLimit', event.target.value)} />
-        </label>
-        <label className="field compact wide">
-          <span>貸款基準價</span>
-          <select value={params.loanBaseMode} onChange={(event) => onUpdate('loanBaseMode', event.target.value)}>
-            {LOAN_BASE_MODES.map((mode) => (
-              <option key={mode.value} value={mode.value}>{mode.label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="field compact wide">
-          <span>手動核貸價(萬)</span>
-          <input min="0" type="number" value={params.manualLoanBasePrice} onChange={(event) => onUpdate('manualLoanBasePrice', event.target.value)} />
         </label>
       </div>
     </section>
@@ -1767,6 +1906,7 @@ function CsvSchemaPanel({ columns, importMessage }) {
 }
 
 function ComparisonPage({
+  comparisonPropertyOrder,
   comparisonRowOrder,
   comparisonSort,
   distanceTargets,
@@ -1774,8 +1914,10 @@ function ComparisonPage({
   onExport,
   onHiddenRowsChange,
   onPinnedRowsChange,
+  onPropertyOrderChange,
   onOpenPhoto,
   onRowOrderChange,
+  onScore,
   onSortChange,
   pinnedRowIds,
   properties,
@@ -1783,13 +1925,21 @@ function ComparisonPage({
   weights,
 }) {
   const [draggingRowId, setDraggingRowId] = useState('');
+  const [draggingPropertyId, setDraggingPropertyId] = useState('');
   const pinnedWrapRef = useRef(null);
   const comparisonWrapRef = useRef(null);
   const syncingScrollRef = useRef(false);
   const allRows = orderComparisonRows(buildComparisonRows(distanceTargets, weights), comparisonRowOrder);
   const comparisonRows = visibleComparisonRows(allRows, hiddenRowIds);
   const pinnedRows = comparisonRows.filter((row) => pinnedRowIds.includes(row.id));
-  const sortedProperties = sortComparisonProperties(properties, comparisonRows, comparisonSort);
+  const sortedProperties = orderComparisonProperties(
+    sortComparisonProperties(properties, comparisonRows, comparisonSort),
+    comparisonPropertyOrder,
+  );
+  const groupedRows = COMPARISON_ROW_GROUPS.map((group) => ({
+    ...group,
+    rows: allRows.filter((row) => comparisonRowGroupId(row) === group.id),
+  })).filter((group) => group.rows.length > 0);
   const hiddenSet = new Set(hiddenRowIds);
   const pinnedSet = new Set(pinnedRowIds);
   const toggleRow = (rowId) => {
@@ -1797,6 +1947,17 @@ function ComparisonPage({
       const currentSet = new Set(current);
       if (currentSet.has(rowId)) currentSet.delete(rowId);
       else currentSet.add(rowId);
+      return Array.from(currentSet);
+    });
+  };
+  const setGroupVisible = (rows, visible) => {
+    const rowIds = rows.map((row) => row.id);
+    onHiddenRowsChange((current) => {
+      const currentSet = new Set(current);
+      rowIds.forEach((rowId) => {
+        if (visible) currentSet.delete(rowId);
+        else currentSet.add(rowId);
+      });
       return Array.from(currentSet);
     });
   };
@@ -1827,8 +1988,20 @@ function ComparisonPage({
     onRowOrderChange(nextIds);
     setDraggingRowId('');
   };
+  const moveProperty = (targetPropertyId) => {
+    if (!draggingPropertyId || String(draggingPropertyId) === String(targetPropertyId)) return;
+    const currentIds = sortedProperties.map((property) => String(property.id));
+    const fromIndex = currentIds.indexOf(String(draggingPropertyId));
+    const toIndex = currentIds.indexOf(String(targetPropertyId));
+    if (fromIndex < 0 || toIndex < 0) return;
+    const nextIds = [...currentIds];
+    const [moved] = nextIds.splice(fromIndex, 1);
+    nextIds.splice(toIndex, 0, moved);
+    onPropertyOrderChange(nextIds);
+    setDraggingPropertyId('');
+  };
   const getNumericState = (row, property) => {
-    if (row.kind !== 'numeric' || sortedProperties.length < 2) return '';
+    if (!['numeric', 'score'].includes(row.kind) || sortedProperties.length < 2) return '';
     const values = sortedProperties.map((item) => Number(row.getNumeric(item))).filter((value) => Number.isFinite(value));
     if (values.length < 2) return '';
     const max = Math.max(...values);
@@ -1901,17 +2074,50 @@ function ComparisonPage({
       <section className="panel row-visibility-panel">
         <div className="panel-head">
           <h3>顯示項目</h3>
-          <button className="btn ghost" type="button" onClick={() => onHiddenRowsChange([])}>
-            全部顯示
-          </button>
+          <div className="button-row">
+            <button className="btn ghost" type="button" onClick={() => onHiddenRowsChange([])}>
+              全部顯示
+            </button>
+            <button className="btn ghost" type="button" onClick={() => onHiddenRowsChange(allRows.map((row) => row.id))}>
+              全部取消
+            </button>
+          </div>
         </div>
-        <div className="row-toggle-grid">
-          {allRows.map((row) => (
-            <label className="row-toggle" key={row.id}>
-              <input checked={!hiddenSet.has(row.id)} type="checkbox" onChange={() => toggleRow(row.id)} />
-              <span>{row.label}</span>
-            </label>
-          ))}
+        <div className="comparison-group-grid">
+          {groupedRows.map((group) => {
+            const visibleCount = group.rows.filter((row) => !hiddenSet.has(row.id)).length;
+            const allVisible = visibleCount === group.rows.length;
+            const partialVisible = visibleCount > 0 && !allVisible;
+            return (
+              <section
+                className={`comparison-group-card ${partialVisible ? 'partial' : ''}`}
+                key={group.id}
+                style={{ '--group-color': group.color }}
+              >
+                <label className="comparison-group-head">
+                  <input
+                    aria-checked={partialVisible ? 'mixed' : allVisible}
+                    checked={allVisible}
+                    type="checkbox"
+                    onChange={(event) => setGroupVisible(group.rows, event.target.checked)}
+                  />
+                  <span>
+                    <strong>{group.label}</strong>
+                    <small>{group.description}</small>
+                  </span>
+                  <em>{visibleCount}/{group.rows.length}</em>
+                </label>
+                <div className="row-toggle-grid compact">
+                  {group.rows.map((row) => (
+                    <label className="row-toggle" key={row.id}>
+                      <input checked={!hiddenSet.has(row.id)} type="checkbox" onChange={() => toggleRow(row.id)} />
+                      <span>{row.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       </section>
 
@@ -1937,9 +2143,8 @@ function ComparisonPage({
                 <tr>
                   <th>項目</th>
                   {sortedProperties.map((property, index) => (
-                    <th key={property.id}>
-                      <PropertyThumb property={property} onOpen={() => onOpenPhoto(property, 0)} />
-                      第 {index + 1} 名
+                    <th className="compact-property-head" key={property.id}>
+                      第 {index + 1} 欄
                       <small>{property.name || '未命名物件'}</small>
                     </th>
                   ))}
@@ -1957,9 +2162,10 @@ function ComparisonPage({
                     </td>
                     {sortedProperties.map((property) => (
                       <td key={property.id}>
+                        {row.kind === 'score' ? <ScoreInputCell onScore={onScore} property={property} row={row} weights={weights} /> : null}
                         {row.kind === 'pairedPrice' ? <PairedPriceCell property={property} row={row} /> : null}
                         {row.kind?.startsWith('mortgage') ? <MortgageCell property={property} row={row} /> : null}
-                        {row.kind !== 'pairedPrice' && !row.kind?.startsWith('mortgage') ? row.getValue(property) : null}
+                        {row.kind !== 'score' && row.kind !== 'pairedPrice' && !row.kind?.startsWith('mortgage') ? row.getValue(property) : null}
                       </td>
                     ))}
                   </tr>
@@ -1986,9 +2192,18 @@ function ComparisonPage({
             <tr>
               <th className="item-col">項目</th>
               {sortedProperties.map((property, index) => (
-                <th key={property.id}>
+                <th
+                  className={draggingPropertyId === String(property.id) ? 'dragging-property' : ''}
+                  draggable
+                  key={property.id}
+                  onDragEnd={() => setDraggingPropertyId('')}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDragStart={() => setDraggingPropertyId(String(property.id))}
+                  onDrop={() => moveProperty(property.id)}
+                >
+                  <span className="drag-handle">↔</span>
                   <PropertyThumb property={property} onOpen={() => onOpenPhoto(property, 0)} />
-                  第 {index + 1} 名
+                  第 {index + 1} 欄
                   <small>{property.name || '未命名物件'}</small>
                   <small>{property.rawData.address || '未填地址'}</small>
                   {property.constraintIssues.length > 0 && <small className="table-issue-text">{property.constraintIssues.join('、')}</small>}
@@ -2047,9 +2262,10 @@ function ComparisonPage({
                         .join(' ')}
                       key={property.id}
                     >
+                      {row.kind === 'score' ? <ScoreInputCell onScore={onScore} property={property} row={row} weights={weights} /> : null}
                       {row.kind === 'pairedPrice' ? <PairedPriceCell property={property} row={row} /> : null}
                       {row.kind?.startsWith('mortgage') ? <MortgageCell property={property} row={row} /> : null}
-                      {row.kind !== 'pairedPrice' && !row.kind?.startsWith('mortgage') ? row.getValue(property) : null}
+                      {row.kind !== 'score' && row.kind !== 'pairedPrice' && !row.kind?.startsWith('mortgage') ? row.getValue(property) : null}
                     </td>
                   ))}
                 </tr>
@@ -2059,6 +2275,24 @@ function ComparisonPage({
         </table>
       </section>
     </main>
+  );
+}
+
+function ScoreInputCell({ onScore, property, row, weights }) {
+  const scoreKey = row.scoreKey;
+  const value = property.scores?.[scoreKey] ?? 0;
+  return (
+    <label className="score-input-cell">
+      <input
+        max="10"
+        min="0"
+        type="number"
+        value={value}
+        onChange={(event) => onScore(property.id, scoreKey, event.target.value)}
+      />
+      <span>/10</span>
+      <em>{weights[scoreKey] ?? 0}%</em>
+    </label>
   );
 }
 
